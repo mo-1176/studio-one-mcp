@@ -64,6 +64,36 @@ test('each request id is answered once; no request, no response', () => {
   assert.ok(first);
 });
 
+test('two bridges on one mailbox run a request once (device added twice)', () => {
+  const host = fakeHost({ commands: COMMANDS });
+  const { get } = loadCore({ host, config: { mailbox: MAILBOX } });
+  const Bridge = get('Bridge');
+  const a = new Bridge({ mailbox: MAILBOX }, null);
+  const b = new Bridge({ mailbox: MAILBOX }, null);
+  let runs = 0;
+  for (const br of [a, b]) {
+    const handle = br.handle.bind(br);
+    br.handle = (op, args) => { runs++; return handle(op, args); };
+  }
+  for (const id of ['x', 'y']) {
+    host.client.write('request.json', { id, op: 'ping' });
+    a.tick('midi');
+    b.tick('midi');
+    a.tick('midi'); // the client nudges again until it reads the response
+    b.tick('midi');
+    const res = host.client.read('response.json');
+    assert.equal(res.id, id);
+    assert.equal(res.session, a.session, 'answered by the bridge that claimed it');
+  }
+  assert.equal(runs, 2, 'one run per request, not one per bridge');
+  // Whichever bridge wakes first takes it.
+  host.client.write('request.json', { id: 'z', op: 'ping' });
+  b.tick('midi');
+  a.tick('midi');
+  assert.equal(host.client.read('response.json').session, b.session);
+  assert.equal(runs, 3);
+});
+
 test('ticks are counted per clock source', () => {
   const { host, bridge } = setup();
   bridge.tick('midi');

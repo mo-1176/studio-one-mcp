@@ -6,6 +6,7 @@
 //   status.json    written by us: {protocol, session, startedAt, heartbeat, component}
 //   request.json   written by the client (atomically): {id, op, args}
 //   response.json  written by us: {id, session, ok, result | error, ms}
+//   claim.json     written by us: {id, session} of the request being run
 //
 // Runs in the component script, the only one of the two with a Host object.
 // Studio One 5 has no usable script timer, so the bridge is event-driven: after
@@ -108,6 +109,14 @@ class Bridge {
         const req = this.mailbox.read("request.json");
         if (!req || typeof req.id !== "string" || req.id === this.lastId) return;
         this.lastId = req.id;
+        // Studio One can run more than one bridge on the same mailbox: the MCP
+        // Bridge device added twice (on Windows a loopMIDI port shows up as a
+        // WinMidi and an emulated DirectMusic port), each woken by the same
+        // nudge. The first to see a request claims it before running it, so an
+        // edit is applied once however many bridges there are.
+        const claim = this.mailbox.read("claim.json");
+        if (claim && claim.id === req.id && claim.session !== this.session) return;
+        this.mailbox.write("claim.json", { id: req.id, session: this.session });
         let result;
         try {
             result = this.handle(req.op, req.args || {});

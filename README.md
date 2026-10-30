@@ -85,7 +85,7 @@ MCP サーバーは、自分で起動して待ち受けさせるものではあ�
 
 | もの | 用途 | 入手・確認 |
 |---|---|---|
-| Node.js 20 以上 | サーバーの実行 | <https://nodejs.org/>。`node -v` で確認します。 |
+| Node.js 20 以上 | サーバーの実行 | <https://nodejs.org/>。インストール後は PowerShell を開き直してから、`node -v` で確認します（PATH を反映するため）。 |
 | Git | リポジトリの取得 | `git --version` で確認します。 |
 | Studio One | 対象の DAW | 導入前に **一度起動して終了** しておきます（ユーザープロファイルが作られます）。 |
 | MCP クライアント | サーバーを呼び出す側 | Claude Code（CLI または VS Code 拡張）、Claude Desktop など。 |
@@ -325,6 +325,7 @@ node src/cli.js uninstall --profile "$env:APPDATA\PreSonus\Studio One 6"
 
 | 症状 | 原因と対処 |
 |---|---|
+| PowerShell で `npm` が「スクリプトの実行が無効になっているため、`npm.ps1` を読み込めません」と言って止まる | Windows の初期設定では、PowerShell はスクリプトの実行を禁止しています。`npm` を `npm.cmd` に置き換えて実行します（例: `npm.cmd run setup -- --profile "…"`。`npx` も `npx.cmd` です）。または、現在のユーザーに限って許可します: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
 | `doctor` の `Studio One profile` が `.dmp` で終わるパスになっている | クラッシュダンプのファイルを、プロファイルのフォルダと取り違えています。`--profile` で本物のフォルダを指定してください（`setup` と `uninstall` も同じです）。 |
 | `Songs folder` が `none found`。`song_list` が `[]` を返す | 既定のフォルダに曲がありません。`STUDIO_ONE_SONGS` を、クライアント登録の `env` に書いてください（手順7）。指定したフォルダの直下に、曲ごとのサブフォルダがあるかも確認します。 |
 | `song_list` が `ENOENT: no such file or directory, scandir …` で失敗する | `STUDIO_ONE_SONGS` に、存在しないフォルダが入っています。パスの綴りと、複数指定の区切り文字（Windows は `;`）を確認してください。 |

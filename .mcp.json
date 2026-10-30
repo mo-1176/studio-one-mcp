@@ -1,5 +1,12 @@
 {
   "mcpServers": {
-    "studio-one": { "command": "node", "args": ["src/server.js"] }
+    "studio-one": {
+      "command": "node",
+      "args": ["src/server.js"],
+      "env": {
+        "STUDIO_ONE_SONGS": "D:\\共有\\プロジェクト",
+        "STUDIO_ONE_MCP_MIDI_PORT": "loopMIDI Port"
+      }
+    }
   }
 }
