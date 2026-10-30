@@ -1,260 +1,491 @@
 # studio-one-mcp
 
-An [MCP](https://modelcontextprotocol.io) server for PreSonus **Studio One**. It lets Claude and other MCP clients read your songs and control a running Studio One.
+PreSonus **Studio One** 用の [MCP](https://modelcontextprotocol.io) サーバーです。Claude などの MCP クライアントから、曲の中身を読んだり、起動中の Studio One を操作したりできます。
 
-Studio One has no public API, no OSC, and no network scripting. This server combines two things it *does* have:
+Studio One には、公開 API も、OSC も、ネットワーク経由のスクリプト機能もありません。このサーバーは、Studio One が実際に持っている次の2つの仕組みを組み合わせています。
 
-| Layer | How | Needs Studio One running? |
+| 層 | 仕組み | Studio One の起動は必要か |
 |---|---|---|
-| **`song_*` tools** | Parse `.song` files, which are zip archives of XML: tempo map, meter, markers, arranger sections, tracks, takes, clips, mixer, plug-in inserts and media. | No. Reflects the last save or autosave. |
-| **`live_*` tools** | A small control-surface device, installed into Studio One, that answers requests through a local **file mailbox**. It uses Studio One's own JavaScript device SDK. | Yes |
+| **`song_*` ツール** | `.song` ファイル（XML を zip で固めたもの）を解析します。テンポマップ、拍子、マーカー、アレンジャーセクション、トラック、テイク、クリップ、ミキサー、プラグインのインサート、メディアを読めます。 | 不要。最後に保存またはオートセーブした時点の状態が見えます。 |
+| **`live_*` ツール** | Studio One に入れる小さなコントロールサーフェス・デバイスが、ローカルの **ファイルメールボックス** を介してリクエストに答えます。Studio One 自身の JavaScript デバイス SDK を使います。 | 必要 |
 
-Status: early. Developed against **Studio One 5.5.2 on macOS**. Paths for Windows and for Studio One 6/7 and Studio Pro 8 are wired in but untested.
+ステータス: 開発初期です。**macOS 上の Studio One 5.5.2** を相手に開発しました。Windows と、Studio One 6/7、Studio Pro 8 向けのパスは用意してありますが、ほとんど検証できていません。Windows 11 + Studio One 6 では、ブリッジの疎通確認（`ping` への応答）までは確認しました。個々の `live_*` ツールの動作は確認していません。
 
-An independent project, not affiliated with or endorsed by PreSonus or Fender. Studio One is their trademark.
+独立したプロジェクトであり、PreSonus や Fender とは無関係で、公認も受けていません。Studio One は PreSonus の商標です。
 
-## Tools
+## ツール一覧
 
-| Tool | What it does |
+| ツール | できること |
 |---|---|
-| `song_list` | Songs on disk, newest first. This includes songs that exist only as autosaves. |
-| `song_read` | One song, as a `summary` (one line per track) or `full` (every take and clip, instrument notes, each plug-in's saved settings, automation envelopes). Both include the song notes and channel notes when there are any. Positions are given as bar/beat and as seconds. |
-| `song_history` | A song's autosaves, for comparing versions. |
-| `song_diff` | What changed between two saves: tempo, meter, markers, sections, tracks (added, removed, renamed, takes, events, notes), mixer (levels, mute/solo, automation mode, output, plug-ins and their settings) and automation. By default it compares the song with its newest autosave, older to newer. |
-| `live_status` | Whether the bridge is reachable. If not, it says why. |
-| `live_song` | The open song as it is right now, unsaved changes included: title, file path, transport (playing, recording, loop, position, tempo, loop range, precount, preroll), track count, selected tracks. |
-| `live_tracks` | Tracks with media type, colour, mixer channel, number of takes, selection, and events (name, start, end, length in seconds, muted). |
-| `live_select_track` | Select a track by name, so that selection-based commands act on it. |
-| `live_transport` | Press a transport button: play, stop, record, return to zero, rewind or forward a bar, go to the loop start or end, toggle loop, click, precount or preroll. |
-| `live_set_transport` | Set the tempo, the playhead position (in seconds, or bars like `"9.1.1.0"`), and loop, precount or preroll on or off. |
-| `live_markers` | Markers with number, position (seconds and bars) and name (live, from the marker track). Reading them briefly moves the playhead and puts it back, so it refuses while playing. Studio One only has recall commands for markers 1 to 20. |
-| `live_add_marker` / `live_delete_marker` / `live_rename_marker` | Add a marker at a position (seconds or bars), optionally named; delete one by number or position; rename one by number or name. The playhead is left where it was. |
-| `live_select_events` | Select every event on some tracks or on all of them, or clear the selection. Selection-based commands then act on those events, e.g. `Event/Mute Events`, `Edit/Split at Cursor`, `Event/Quantize`, `Track/Activate Next Layer` (switch takes), `Edit/Undo`. |
-| `live_set_loop` | Set the loop range in seconds or bars (e.g. `"9.1.1.0"` to `"17.1.1.0"`), and turn looping on or off. |
-| `live_takes` | A track's takes: list them (with names from the last save), switch to the next or previous take or to take N, add an empty take or duplicate the active one, unpack them to separate tracks, or recall a retrospective recording. |
-| `live_track_state` | Arm, monitor, mute, solo, hide or duplicate a track by name, or show all tracks. |
-| `live_edit_events` | Clip edits on one track: mute or unmute, quantize, transpose, split or trim at a time, merge, delete. |
-| `live_events` | One event on a track, by number (in time order) or name: list them (with gain and fades for audio), **edit** it (move to a position, move to another track, set or add gain in dB, fade in and out) as one undo step, **duplicate** it N times, or **copy** it to a position on any track (through the clipboard). |
-| `live_add_track` | Add an audio (mono or stereo), instrument, folder or automation track. |
-| `live_meters` | Peak dB for every channel. With `duration_ms`, it samples during playback and reports the highest peak and any clipping. |
-| `live_save`, `live_undo`, `live_redo` | Save (optionally as a new version), and undo or redo edits, with a step count. Check the result rather than counting undo steps: see [Undo](#undo). |
-| `live_plugins` / `live_add_plugin` | The installed plug-ins by name (PreSonus, VST and AU): effects, or instruments with `kind: "instrument"`. Add an effect to a channel's inserts by name; one undo removes it. |
-| `live_add_send` | Add an effect send: Studio One makes a new FX channel with the plug-in and a send to it (a reverb or delay send). Sending to an existing bus is not reachable from scripts, and this is not reliably undone. |
-| `live_add_instrument_track` | Add an instrument track with a new instance of an instrument by name (Mai Tai, Presence…). One undo removes both. |
-| `live_inserts` / `live_bypass_insert` | Plug-ins on each channel (slot, name, bypassed), and bypass one slot or the whole rack. |
-| `live_sends` / `live_set_send` | Each channel's sends (destination name, level 0..1 and in dB, mute), and set a level or mute. |
-| `live_plugin_params` / `live_set_plugin_param` | A plug-in's parameters (value, display text like `"2.0:1"`, range, normalised value), and set one by display text, normalised value or raw value. Studio One cannot list a plug-in's parameters, so names come from its presets and Studio One's remote-control map, which covers the PreSonus plug-ins. For other plug-ins, pass the names. |
-| `live_mix_snapshot` | Save the whole mix under a name (every channel's volume, pan, mute, solo, monitoring and send levels, per song), restore it later, or list them. Restore sets only what differs. Record-arm and automation mode are not included. |
-| `live_plugin_snapshot` | Save a plug-in's current settings under a name, and restore them onto the same kind of plug-in on any channel. A stand-in for presets: Studio One's preset commands act on the focused editor window and store through dialogs. |
-| `live_record_setup` | Read and set the metronome (click, precount and its length in bars, preroll), and set record modes (replace, loop takes or mix, takes to layers, input quantize, note erase). Studio One does not expose record modes for reading, so those are reported as set, not confirmed. Auto Punch: off, in, out or both, with a punch range (Studio One punches between the loop locators; looping is not switched on). |
-| `live_set_automation` | Set a channel's automation mode: off, read, touch, latch or write. `live_channels` shows each channel's mode. |
-| `live_write_automation` | Write volume (in dB) or pan automation along points, straight lines between them. Scripts cannot add envelope points, so it plays the range once in Write mode with the fader following the curve, then leaves the channel in Read. Audible, and only with `confirm: true`. |
-| `live_arranger` | Arranger sections: list them (live), go to one by number or name (a jump at the sync point while playing, a playhead move while stopped), step next or previous while playing, set the sync mode, create sections from markers, and **add, rename, resize, move or remove** a section (each one undo; the events under a section are not moved). With its content on every track: **copy** a section in at a position (what follows moves later), **delete** it and close the gap, or **move** it (`content: true`). The loop range is kept. |
-| `live_macros` / `live_run_macro` | The macros (built-in and your own) by title, and run one by title, or only check whether it is enabled. |
-| `live_time_signature` | The time signature at any positions; insert one at a bar, or remove one. Each is one undo. |
-| `live_tempo` | The tempo at any positions, set the tempo of the segment containing a position, or insert a tempo change. Studio One must be stopped; the playhead is put back. Removing an inserted change takes undo, so check with `at` afterwards. |
-| `live_notes` | Notes in an instrument track's parts: pitch (number and name, middle C = C3), velocity 0 to 127, start, end and length in seconds, start in beats. Read-only. |
-| `live_edit_notes` | Edit an instrument track's notes: transpose, set or change velocity, move, change length, quantize (to a grid like `1/16`, `1/8T` or `1/8.`, with a strength), delete (with a filter), add notes. Filters by pitch and beat range. Runs through a small edit-task extension installed with the device, so no dialog opens, and Studio One's own quantize setting is left alone. |
-| `live_create_part` | Make an instrument part (MIDI clip) on an instrument track from a start to an end (seconds or bars), and optionally fill it with notes. Works on an empty track. Note beats count from the start of the part. One undo removes the part and its notes. |
-| `live_add_notes` | Add notes to one part of an instrument track, by number or name, even an empty one. Beats count from the start of that part. Use this instead of `live_edit_notes` add on a track with more than one part, since that adds into the first. |
-| `live_track_edit` | By track name: rename, recolour (`"#rrggbb"`), remove, **move** it before or after another track, **route** its output to a bus or output, move it into a **folder** (creating the folder if asked), or **rename its events** (numbered in time order if asked). Rename and colour are not on the undo stack; route is set back with the "before" value it returns; remove, move, folder and event renames undo. Move, route, folder and event renames run through the **MCP Track Edit** task in the extension. |
-| `live_bounce` | Bounce all events on a track, in place or to a new track (the originals are muted), without dialogs. One undo reverts it; the rendered file stays in the song's Bounces folder. Mixdown and stem export open dialogs, so they are not offered. |
-| `live_record` | Record, which writes a take into the song. Only runs with `confirm: true`. It can arm a track first, start from a position, set precount, and stop after N seconds. |
-| `live_channels` | Live mixer: volume, pan, mute, solo, record-arm, input monitoring, automation mode, and routing (input and output by name) for each channel. To change a track's output, use `live_track_edit` with `route`. |
-| `live_set_channel` | Set volume, pan, mute, solo, record-arm or input monitoring on a channel. |
-| `live_add_bus` | Create a bus for some tracks (their outputs are routed into it) or a VCA that controls them. One undo removes it and puts the routing back. |
-| `live_command` | Run any of the roughly 1,000 Studio One commands, e.g. `Transport/Start`, `Edit/Undo`, `File/Save` or `View/Console`. `check_only` reports whether one is enabled without running it. |
-| `live_list_commands` | Discover command names, optionally with whether each is enabled right now. |
-| `live_changes` | What changed in the song since the previous call: tracks added, removed, renamed or reordered, events on each track, mixer changes (levels, mute and solo, arm, monitor, automation mode, output, plug-ins), tempo, loop, markers and sections. It compares snapshots, so it sees what you did by hand as well, as net changes. |
-| `live_eval` | Run JavaScript inside Studio One to explore its object model. Opt-in only. |
+| `song_list` | ディスク上の曲を新しい順に一覧します。オートセーブしか存在しない曲も含みます。 |
+| `song_read` | 1曲を `summary`（1トラック1行）または `full`（すべてのテイクとクリップ、インストゥルメントのノート、各プラグインの保存済み設定、オートメーションのエンベロープ）で返します。どちらにも、曲のノートとチャンネルのノートがあれば含まれます。位置は小節/拍と秒の両方で示します。 |
+| `song_history` | 曲のオートセーブの一覧。バージョンの比較に使います。 |
+| `song_diff` | 2つの保存状態の差分: テンポ、拍子、マーカー、セクション、トラック（追加、削除、名前変更、テイク、イベント、ノート）、ミキサー（レベル、ミュート/ソロ、オートメーションモード、出力、プラグインとその設定）、オートメーション。既定では、曲を最新のオートセーブと比べます（古い方から新しい方へ）。 |
+| `live_status` | ブリッジに到達できるか。できない場合は理由も返します。 |
+| `live_song` | いま開いている曲の現在の状態（未保存の変更を含む）: タイトル、ファイルパス、トランスポート（再生中、録音中、ループ、位置、テンポ、ループ範囲、プリカウント、プリロール）、トラック数、選択中のトラック。 |
+| `live_tracks` | トラックの一覧: メディアタイプ、色、ミキサーチャンネル、テイク数、選択状態、イベント（名前、開始、終了、秒単位の長さ、ミュート）。 |
+| `live_select_track` | 名前でトラックを選択します。選択に対して働くコマンドが、そのトラックに作用するようになります。 |
+| `live_transport` | トランスポートのボタンを押します: 再生、停止、録音、ゼロに戻る、1小節の巻き戻し/早送り、ループの開始/終了へ移動、ループ・クリック・プリカウント・プリロールの切り替え。 |
+| `live_set_transport` | テンポ、プレイヘッド位置（秒、または `"9.1.1.0"` のような小節表記）、ループ/プリカウント/プリロールのオンオフを設定します。 |
+| `live_markers` | マーカーの番号、位置（秒と小節）、名前（マーカートラックからライブで取得）。読み取り中はプレイヘッドを一時的に動かして元に戻すため、再生中は拒否します。Studio One がマーカーに持っている呼び出しコマンドは 1〜20 番だけです。 |
+| `live_add_marker` / `live_delete_marker` / `live_rename_marker` | 指定位置（秒または小節）にマーカーを追加（名前は任意）、番号または位置で削除、番号または名前で名前変更。プレイヘッドは元の位置のままです。 |
+| `live_select_events` | 一部またはすべてのトラックのイベントをすべて選択、または選択解除します。その後は、選択に対して働くコマンドがそれらのイベントに作用します。例: `Event/Mute Events`、`Edit/Split at Cursor`、`Event/Quantize`、`Track/Activate Next Layer`（テイクの切り替え）、`Edit/Undo`。 |
+| `live_set_loop` | ループ範囲を秒または小節（例: `"9.1.1.0"` から `"17.1.1.0"`）で設定し、ループのオンオフを切り替えます。 |
+| `live_takes` | トラックのテイク: 一覧（名前は最後の保存時点のもの）、次/前のテイクまたは N 番目への切り替え、空のテイクの追加またはアクティブなテイクの複製、別々のトラックへの展開（unpack）、遡及録音（retrospective recording）の呼び出し。 |
+| `live_track_state` | 名前でトラックを指定して、録音待機（arm）、モニター、ミュート、ソロ、非表示、複製。または、すべてのトラックを表示します。 |
+| `live_edit_events` | 1トラック上のクリップ編集: ミュート/ミュート解除、クオンタイズ、トランスポーズ、指定時刻での分割/トリム、結合、削除。 |
+| `live_events` | トラック上の1つのイベントを、番号（時間順）または名前で指定します。一覧（オーディオはゲインとフェード付き）、**編集**（位置へ移動、別トラックへ移動、ゲインを dB で設定/追加、フェードイン/アウト。アンドゥ1回分）、N 回の**複製**、任意のトラックの指定位置への**コピー**（クリップボード経由）ができます。 |
+| `live_add_track` | オーディオ（モノ/ステレオ）、インストゥルメント、フォルダ、オートメーションのトラックを追加します。 |
+| `live_meters` | 全チャンネルのピーク dB。`duration_ms` を指定すると、再生中にサンプリングして、最大ピークとクリップの有無を返します。 |
+| `live_save`, `live_undo`, `live_redo` | 保存（新しいバージョンとして保存も可）、編集のアンドゥ/リドゥ（ステップ数を指定可）。アンドゥのステップ数を数えるのではなく、結果を確認してください: [アンドゥ](#アンドゥ)を参照。 |
+| `live_plugins` / `live_add_plugin` | インストール済みのプラグインを名前で一覧します（PreSonus、VST、AU）。エフェクトのほか、`kind: "instrument"` でインストゥルメントも。エフェクトを名前で指定してチャンネルのインサートに追加します。アンドゥ1回で外せます。 |
+| `live_add_send` | エフェクトセンドを追加します。Studio One がプラグイン入りの新しい FX チャンネルと、そこへのセンドを作ります（リバーブやディレイのセンド）。既存のバスへのセンドはスクリプトから届かず、この操作は確実にはアンドゥできません。 |
+| `live_add_instrument_track` | インストゥルメント（Mai Tai、Presence…）を名前で指定し、その新しいインスタンス付きのインストゥルメントトラックを追加します。アンドゥ1回で両方が消えます。 |
+| `live_inserts` / `live_bypass_insert` | 各チャンネルのプラグイン（スロット、名前、バイパス状態）。1つのスロット、またはラック全体をバイパスします。 |
+| `live_sends` / `live_set_send` | 各チャンネルのセンド（宛先名、レベル 0..1 と dB、ミュート）の取得と、レベルやミュートの設定。 |
+| `live_plugin_params` / `live_set_plugin_param` | プラグインのパラメーター（値、`"2.0:1"` のような表示テキスト、範囲、正規化値）の取得と、表示テキスト・正規化値・生の値による設定。Studio One はプラグインのパラメーター一覧を取得できないため、名前はプリセットと Studio One のリモコンマップ（PreSonus のプラグインを網羅）から得ます。それ以外のプラグインでは、名前を渡してください。 |
+| `live_mix_snapshot` | ミックス全体に名前を付けて保存し（各チャンネルのボリューム、パン、ミュート、ソロ、モニタリング、センドレベル。曲ごと）、後で復元、または一覧表示します。復元は、違っている部分だけを設定します。録音待機とオートメーションモードは含みません。 |
+| `live_plugin_snapshot` | プラグインの現在の設定に名前を付けて保存し、同じ種類のプラグインに（別のチャンネル上でも）復元します。プリセットの代用です。Studio One のプリセット関連コマンドは、フォーカス中のエディタウィンドウに作用し、ダイアログ経由で保存するためです。 |
+| `live_record_setup` | メトロノーム（クリック、プリカウントとその小節数、プリロール）の取得と設定、録音モード（置き換え、ループテイクまたはミックス、テイクをレイヤーへ、入力クオンタイズ、ノート消去）の設定。録音モードは Studio One が読み取りを公開していないため、「設定した」とだけ報告し、確認はしません。オートパンチ: オフ、イン、アウト、両方、パンチ範囲付き（Studio One はループロケーターの間でパンチします。ループはオンになりません）。 |
+| `live_set_automation` | チャンネルのオートメーションモードを設定します: オフ、リード、タッチ、ラッチ、ライト。`live_channels` で各チャンネルのモードが分かります。 |
+| `live_write_automation` | ボリューム（dB）またはパンのオートメーションを、点と点を直線で結んで書き込みます。スクリプトからはエンベロープの点を追加できないため、Write モードでフェーダーを曲線に追従させながら、その範囲を1回再生して書き込み、最後にチャンネルを Read に戻します。音が出ます。`confirm: true` のときだけ実行します。 |
+| `live_arranger` | アレンジャーのセクション: 一覧（ライブ）、番号または名前で移動（再生中はシンクポイントでのジャンプ、停止中はプレイヘッドの移動）、再生中に次/前へ、シンクモードの設定、マーカーからのセクション作成、セクションの**追加・名前変更・サイズ変更・移動・削除**（それぞれアンドゥ1回。セクション下のイベントは動きません）。全トラックの中身ごと扱う操作もあります: セクションを指定位置に**コピー**（後続は後ろにずれる）、**削除**して隙間を詰める、**移動**（`content: true`）。ループ範囲は維持されます。 |
+| `live_macros` / `live_run_macro` | マクロ（組み込みとユーザー作成）をタイトルで一覧し、タイトルを指定して実行します。実行せずに、有効かどうかだけ確認することもできます。 |
+| `live_time_signature` | 任意の位置の拍子の取得、小節への拍子の挿入、削除。それぞれアンドゥ1回です。 |
+| `live_tempo` | 任意の位置のテンポの取得、ある位置を含む区間のテンポの設定、テンポ変更の挿入。Studio One が停止中である必要があります。プレイヘッドは元に戻します。挿入したテンポ変更の削除はアンドゥで行うため、あとで `at` を指定して確認してください。 |
+| `live_notes` | インストゥルメントトラックのパート内のノート: ピッチ（番号と名前。中央のド = C3）、ベロシティ 0〜127、秒単位の開始・終了・長さ、拍単位の開始。読み取り専用です。 |
+| `live_edit_notes` | インストゥルメントトラックのノートを編集します: トランスポーズ、ベロシティの設定/変更、移動、長さの変更、クオンタイズ（`1/16`、`1/8T`、`1/8.` のようなグリッドと強さを指定）、削除（フィルター付き）、ノートの追加。ピッチと拍の範囲で絞り込めます。デバイスと一緒に入る小さな編集タスク拡張機能を経由するので、ダイアログは開かず、Studio One 自身のクオンタイズ設定にも触れません。 |
+| `live_create_part` | インストゥルメントトラックに、開始から終了（秒または小節）までのインストゥルメントパート（MIDI クリップ）を作り、必要ならノートを入れます。空のトラックでも動きます。ノートの拍は、パートの先頭から数えます。アンドゥ1回で、パートとノートが消えます。 |
+| `live_add_notes` | インストゥルメントトラックの1つのパートに、番号または名前を指定してノートを追加します。空のパートでも可。拍は、そのパートの先頭から数えます。パートが複数あるトラックでは、`live_edit_notes` の add が最初のパートに入ってしまうので、こちらを使ってください。 |
+| `live_track_edit` | トラック名を指定して、名前の変更、色の変更（`"#rrggbb"`）、削除、別のトラックの前後への**移動**、出力のバスや出力への**ルーティング**、**フォルダ**への移動（必要なら作成）、**イベント名の変更**（必要なら時間順の連番）を行います。名前と色はアンドゥの対象外です。ルーティングは、返される「変更前」の値で戻せます。削除、移動、フォルダ、イベント名の変更はアンドゥできます。移動、ルーティング、フォルダ、イベント名の変更は、拡張機能内の **MCP Track Edit** タスクで実行します。 |
+| `live_bounce` | トラック上のすべてのイベントを、その場で、または新しいトラックにバウンスします（元のイベントはミュートされます）。ダイアログは開きません。アンドゥ1回で戻せます。書き出されたファイルは、曲の Bounces フォルダに残ります。ミックスダウンとステム書き出しはダイアログが開くので、提供していません。 |
+| `live_record` | 録音します。テイクが曲に書き込まれます。`confirm: true` のときだけ実行します。先にトラックを録音待機にする、位置から開始する、プリカウントを設定する、N 秒後に停止する、といったことができます。 |
+| `live_channels` | ライブのミキサー: 各チャンネルのボリューム、パン、ミュート、ソロ、録音待機、入力モニタリング、オートメーションモード、ルーティング（入力と出力を名前で）。トラックの出力を変えるには、`live_track_edit` の `route` を使います。 |
+| `live_set_channel` | チャンネルのボリューム、パン、ミュート、ソロ、録音待機、入力モニタリングを設定します。 |
+| `live_add_bus` | 複数のトラック用のバス（それらの出力がバスにルーティングされます）、またはそれらを制御する VCA を作ります。アンドゥ1回で削除され、ルーティングも元に戻ります。 |
+| `live_command` | Studio One の約1,000個のコマンドのどれでも実行できます。例: `Transport/Start`、`Edit/Undo`、`File/Save`、`View/Console`。`check_only` を指定すると、実行せずに有効かどうかだけ報告します。 |
+| `live_list_commands` | コマンド名を探します。必要なら、いま有効かどうかも付けます。 |
+| `live_changes` | 前回の呼び出し以降に曲で変わったこと: トラックの追加・削除・名前変更・並べ替え、各トラックのイベント、ミキサーの変更（レベル、ミュートとソロ、録音待機、モニター、オートメーションモード、出力、プラグイン）、テンポ、ループ、マーカー、セクション。スナップショットを比較するので、手で行った操作も、正味の変化として見えます。 |
+| `live_eval` | Studio One の中で JavaScript を実行し、そのオブジェクトモデルを調べます。明示的に有効にした場合のみ使えます。 |
 
-## Install
+## 導入（ゼロから）
 
-You need Node.js 20 or newer and Studio One.
+MCP サーバーは、自分で起動して待ち受けさせるものではありません。Claude Code や Claude Desktop などの **MCP クライアント** が、登録された設定に従って `node src/server.js` を子プロセスとして自動で起動し、標準入出力（stdio）で会話します。手で `node src/server.js` を実行しても、何も表示されないまま入力待ちになるだけで、それが正常です。
 
-```sh
-npx -y studio-one-mcp setup
-```
+そのため「導入」とは、次の4つを用意することです。
 
-That is the whole install: npm fetches the package and the guided setup below takes it from there. To work on the code instead, clone it and run setup from the checkout, which then registers that checkout:
+- **A. サーバー本体**: Node.js と、このリポジトリ。
+- **B. Studio One 側の部品**: MCP Bridge デバイスと編集タスク拡張機能、そして **仮想MIDIポート**（`live_*` ツールにだけ必要）。
+- **C. クライアントへの登録**: どのコマンドでサーバーを起動するか。
+- **D. 環境変数**: 曲フォルダ、MIDIポート名など。登録の `env` に書きます。
 
-```sh
-git clone https://github.com/NeanderthalMan/studio-one-mcp.git
+`song_*` ツールだけ使うなら、B は不要です。A・C・D だけで動きます。`setup` コマンドは、B のうちデバイスと拡張機能の導入と、C のクライアントへの登録を、対話式で進めてくれます。ただし、Node.js とリポジトリの用意（A）、仮想MIDIポートの作成（B の一部）、曲フォルダなどの環境変数（D）は、自分で行う必要があります。以下は、まっさらな PC で通しで行う手順です。
+
+### 必要なもの
+
+| もの | 用途 | 入手・確認 |
+|---|---|---|
+| Node.js 20 以上 | サーバーの実行 | <https://nodejs.org/>。`node -v` で確認します。 |
+| Git | リポジトリの取得 | `git --version` で確認します。 |
+| Studio One | 対象の DAW | 導入前に **一度起動して終了** しておきます（ユーザープロファイルが作られます）。 |
+| MCP クライアント | サーバーを呼び出す側 | Claude Code（CLI または VS Code 拡張）、Claude Desktop など。 |
+| 仮想MIDIポート | `live_*` の「呼び鈴」 | macOS: IAC Driver（OS 標準）。Windows: [loopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html)（無料）。 |
+
+### 1. 仮想MIDIポートを用意する（`live_*` を使う場合）
+
+Studio One のスクリプトはソケットを開けないので、サーバーは「リクエストを書いたよ」と知らせる呼び鈴として、仮想MIDIポートにMIDIノートを送ります（しくみは[ライブブリッジのしくみ](#ライブブリッジのしくみ)を参照）。
+
+- **Windows**: loopMIDI をインストールして起動し、ポート名の欄に `studio-one-mcp` と入力して **+** ボタンでポートを追加します。loopMIDI は常駐アプリで、起動している間だけポートが存在します。Windows の起動時に自動で立ち上がるようにしておくと楽です。
+- **macOS**: OS 標準の IAC Driver を有効にします。Audio MIDI Setup を開き、Window → Show MIDI Studio → **IAC Driver** をダブルクリックして、**Device is online** にチェックを入れます（日本語表示の macOS では、対応する日本語名の項目です。`setup` が Audio MIDI Setup を開くこともできます）。
+
+### 2. リポジトリを取得する
+
+```powershell
+git clone https://github.com/mo-1176/studio-one-mcp.git
 cd studio-one-mcp
 npm install
-npx studio-one-mcp setup
 ```
 
-`setup` walks you through each step and asks before changing anything:
+- 置き場所は固定してください。クライアントへの登録にこのフォルダの絶対パスが記録されるので、あとで移動すると、サーバーが起動しなくなります。
+- クローンせずに、npm に公開されている版を使うこともできます。その場合は上の3行を省き、以降の `npm run setup` を `npx -y studio-one-mcp setup` に読み替えます。公開版は更新が遅れていることがあり、このリポジトリの最新の修正を含まない場合があります。
 
-1. It finds your Studio One user profile.
-2. It installs the **MCP Bridge** device into it, and a small extension (`Extensions/studio-one-mcp.edittasks`) that lets the bridge edit notes.
-3. It checks for a virtual MIDI port, which acts as the bridge's doorbell:
-   - **macOS:** the built-in IAC Driver. `setup` can open Audio MIDI Setup for you. Tick **Device is online** under **IAC Driver**.
-   - **Windows:** install [loopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html) and add a port named `studio-one-mcp`.
-4. It registers the server with Claude Code (all projects) and, if you want, Claude Desktop. Installed with `npx`, it registers `npx -y studio-one-mcp@<this version>`, pinned so the server always matches the device it installed; from a clone, it registers that checkout. It backs up the Desktop config before editing it. For any other client, it prints the JSON to paste.
-5. It shows the one step you do in Studio One: **Preferences… (⌘,)** on a Mac, **Options** on Windows → **External Devices → Add… → studio-one-mcp → MCP Bridge**. Set **Receive From** to your virtual MIDI port, and **Send To** to None. Restart Studio One first if it was running.
-6. It waits for Studio One to answer.
+### 3. Studio One を一度起動して終了する
 
-From a clone, `npm run setup` does the same thing. Use `--yes` to accept the defaults, `--dry-run` to see what it would do, and `--profile <dir>` to pick a profile.
+初回の起動で、ユーザープロファイルが作られます。
 
-If something doesn't work, run:
+- Windows: `%APPDATA%\PreSonus\Studio One 6` など
+- macOS: `~/Library/Application Support/PreSonus/Studio One 6` など
+
+`setup` は、ここにデバイスを入れます。すでに Studio One を使っているなら、この手順は不要です。
+
+### 4. `setup` を実行する
+
+Windows（PowerShell）:
+
+```powershell
+npm run setup -- --profile "$env:APPDATA\PreSonus\Studio One 6"
+```
+
+macOS:
 
 ```sh
-npx -y studio-one-mcp doctor   # from a clone also: npm run doctor
+npm run setup
 ```
 
-It checks every link in the chain and tells you how to fix the first broken one: Node, profile, Songs folder, device installed and current, edit-task extension installed and current, MIDI port, Studio One running, bridge loaded, bridge answering, the edit task loaded in Studio One, and MCP client registration. `setup` treats the device and the extension as one install: if either is missing or out of date (for example after an update), it offers to reinstall both.
+`setup` は、各段階の前に何をするかを表示し、ファイルを変更する前に確認します。オプションは次の3つです。
 
-To remove the device and the extension: `npx -y studio-one-mcp uninstall`, then remove **MCP Bridge** under External Devices.
+- `--yes`: 確認を省き、既定の答えを受け入れます。
+- `--dry-run`: 何も変更せず、やる予定のことだけ表示します。
+- `--profile <dir>`: Studio One のユーザープロファイルを指定します。
 
-To update: `npx -y studio-one-mcp@latest setup`. It reinstalls the device and the extension and registers the new version. From a clone: `git pull`, then `setup` again. Either way, restart Studio One afterwards: it loads the device and the extension only at startup.
+Windows では、`--profile` を付けることを勧めます。`Studio One 6` の部分は、`%APPDATA%\PreSonus`（または `%APPDATA%\Fender`）の中にある、実際のユーザーフォルダに合わせてください。付けずに自動検出に任せると、同じ場所に溜まっている Studio One のクラッシュダンプ（`Studio One_….dmp`）を、プロファイルのフォルダと取り違えることがあります。
 
-**Without the live bridge:** the `song_*` tools need nothing but the MCP registration. They read your `.song` files directly.
+| 段階 | `setup` がすること | 答え方 |
+|---|---|---|
+| 1. Studio One | ユーザープロファイルを探して表示します。 | — |
+| 2. MCP Bridge device | プロファイルの `User Devices\studio-one-mcp` にブリッジのデバイスを、`Extensions\studio-one-mcp.edittasks` に編集タスク拡張機能を入れます。そのあと、`live_eval`（Studio One の中で任意の JavaScript を実行する、開発用の機能）を有効にするか聞きます。 | インストールは Y。`live_eval` は、通常は **N**（既定）。 |
+| 3. Virtual MIDI port | 仮想MIDIポートを探します。見つからなければ、現れるまで最大約3分待ちます。 | 手順1で作ってあれば、そのまま進みます。 |
+| 4. Register with your MCP client | Claude Code に登録します（`claude` コマンドが PATH にあるときだけ。全プロジェクトで使える user スコープ）。Claude Desktop にも登録できます（既定は No。元の設定ファイルは `.bak-日時` の名前でバックアップします）。どのクライアントにも使える JSON も表示します。 | 使うクライアントに Y。 |
+| 5. In Studio One | Studio One 側でやる操作（次の手順5）を表示します。 | — |
+| 6. Check the connection | Studio One が `ping` に答えるまで、最大約3分待ちます。 | **手順5を済ませてから** Y。後回しなら n（あとで `doctor` で確認できます）。 |
 
-### Configuration
+補足:
 
-| Env var | Default |
+- 仮想MIDIポートが複数あると、`setup` が意図と違うポートを選ぶことがあります（名前に `studio-one-mcp` または `loopMIDI` を含むポートのうち、先に見つかったものを選びます）。段階3の `Using "…"` と、段階5の `Receive From:` に表示された名前を、手順5の Studio One の設定と、手順6〜7の `STUDIO_ONE_MCP_MIDI_PORT` に揃えてください。
+- `claude` コマンド（Claude Code CLI）が PATH に無いと、段階4は Claude Code の項目を黙って飛ばします。VS Code 拡張だけを入れている場合などです。その場合は、手順6で手動登録します。
+
+### 5. Studio One に MCP Bridge を追加する（1回だけ）
+
+1. Studio One が起動中なら、いったん終了して起動し直します。デバイスと拡張機能は、起動時にしか読み込まれません。
+2. Windows は Studio One の **Options**、macOS は **Preferences…**（⌘,）を開き、**External Devices** → **Add…** を選びます。
+3. 一覧から `studio-one-mcp` → **MCP Bridge** を選んで OK を押します。
+4. **Receive From** に、仮想MIDIポート（`setup` が表示した名前。例: `studio-one-mcp`）を選びます。**Send To** は **None** にします。
+
+### 6. MCP クライアントに登録する
+
+`setup` が登録を済ませているなら、確認だけで足ります。
+
+#### Claude Code
+
+`claude` コマンドが使える場合は、登録を確認します。
+
+```powershell
+claude mcp list
+```
+
+`studio-one` が無いときは、手動で登録します。
+
+```powershell
+claude mcp add --env STUDIO_ONE_MCP_MIDI_PORT=studio-one-mcp --env "STUDIO_ONE_SONGS=D:\共有\プロジェクト" --transport stdio --scope user studio-one -- node "D:\tools\studio-one-mcp\src\server.js"
+```
+
+- `--scope user` にすると、どのフォルダで Claude Code を開いても使えます。
+- `--env` は、サーバーに渡す環境変数です（1つにつき1回書きます）。`--env` の直後にサーバー名を置くと、名前まで環境変数として解釈されて拒否されます。そのため、間に `--transport stdio` などの別のオプションを挟みます。
+- `--` より後ろが、サーバーを起動するコマンドです。`D:\tools\studio-one-mcp` は、手順2で取得した場所に置き換えてください。
+- 曲が `Documents\Studio One\Songs` にあるなら、`STUDIO_ONE_SONGS` は不要です。macOS で IAC Driver を使うなら、`STUDIO_ONE_MCP_MIDI_PORT` も不要です。
+- Claude Code の中では、`/mcp` で各サーバーの状態を確認でき、再接続もできます。
+
+このリポジトリの直下には `.mcp.json` があります。これは **プロジェクトスコープ** の登録で、このリポジトリのフォルダを Claude Code で開いたときだけ有効です（初回は承認を求められます）。同じ名前（`studio-one`）が複数のスコープにあると、Claude Code は優先順位の高い方（local → project → user）を **丸ごと** 使い、項目は合成されません。つまり、`.mcp.json` に `env` が無ければ、user スコープに書いた `env`（曲フォルダ、MIDIポート名）は、このフォルダでは効きません。このフォルダで使うなら `.mcp.json` にも `env` を書くか、別のフォルダで Claude Code を開いてください。
+
+`claude` コマンドが無く、VS Code 拡張だけで使っている場合は、Claude Code CLI を別途入れて上のコマンドを実行するか、作業フォルダ直下の `.mcp.json` に書きます。
+
+```json
+{
+  "mcpServers": {
+    "studio-one": {
+      "command": "node",
+      "args": ["D:\\tools\\studio-one-mcp\\src\\server.js"],
+      "env": {
+        "STUDIO_ONE_MCP_MIDI_PORT": "studio-one-mcp",
+        "STUDIO_ONE_SONGS": "D:\\共有\\プロジェクト"
+      }
+    }
+  }
+}
+```
+
+JSON なので、`\` は `\\` と書きます。個人のパスが入るので、共有リポジトリにはコミットしないでください。`.mcp.json` の値には、`${変数名}` や `${変数名:-既定値}` で OS の環境変数を埋め込むこともできます（未設定で既定値もないと、警告が出て、`${変数名}` という文字列がそのまま渡されます）。詳しくは Claude Code の[公式ドキュメント](https://code.claude.com/docs/en/mcp)を参照してください。
+
+#### Claude Desktop
+
+`setup` の段階4で `y` と答えると追加されます。手動の場合は、設定ファイルの `mcpServers` に追加して、Claude Desktop を再起動します。
+
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "studio-one": {
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": ["D:\\tools\\studio-one-mcp\\src\\server.js"],
+      "env": {
+        "STUDIO_ONE_MCP_MIDI_PORT": "studio-one-mcp",
+        "STUDIO_ONE_SONGS": "D:\\共有\\プロジェクト"
+      }
+    }
+  }
+}
+```
+
+`command` には `node` の絶対パスを書きます（`setup` もそうしています。Windows では `where.exe node` で調べられます）。
+
+#### その他のクライアント
+
+`setup` の段階4が表示する JSON（`{"mcpServers":{"studio-one":{…}}}`）を、そのクライアントの MCP 設定に貼ります。
+
+### 7. 曲フォルダと MIDI ポート名を、登録の `env` に書く
+
+`song_*` は、既定では `~/Documents/Studio One/Songs`（と `~/Documents/Studio Pro/Songs`）にある曲を探します。曲をほかの場所に置いているなら、`STUDIO_ONE_SONGS` でフォルダを教えます。Windows で `live_*` を使うなら、`STUDIO_ONE_MCP_MIDI_PORT` も必要です（既定値が macOS の `IAC` だけなので）。`setup` は、IAC 以外のポートを選んだ場合、`STUDIO_ONE_MCP_MIDI_PORT` を登録の `env` に自動で入れますが、`STUDIO_ONE_SONGS` は入れません。
+
+これらの環境変数は、**MCP サーバーを起動する側に渡す** 必要があります。いちばん確実なのは、手順6の登録の `env` に書くことです。PowerShell の `$env:STUDIO_ONE_SONGS = "…"` は、その PowerShell のセッションと、そこから起動したプロセスにしか効きません。Claude Code や Claude Desktop が起動するサーバーには届かないので、登録の代わりにはなりません。
+
+複数のフォルダを指定するときは、OS のリスト区切り文字（環境変数 `PATH` と同じ）で区切ります。Windows は `;`、macOS/Linux は `:` です。
+
+```text
+Windows:  D:\共有\プロジェクト;E:\Songs
+macOS:    /Volumes/Music/Songs:/Users/me/Documents/Studio One/Songs
+```
+
+`song_*` は、指定したフォルダの直下にあるサブフォルダを、1つずつ調べます。サブフォルダの中の `.song` ファイルが曲（タイトルはファイル名）で、その下の `History` フォルダにあるオートセーブも拾います。一度も手で保存していない曲は、オートセーブだけが入ったサブフォルダとして一覧に出ます。Studio One が標準で作る構成（`<Songs フォルダ>\<曲名>\<曲名>.song`）なら、そのまま読めます。指定したフォルダ自体が存在しないと、エラーになります。
+
+### 8. 動作確認
+
+まず `doctor` で、鎖の各輪を順に確認します。読み取り専用で、起動中の Studio One には `ping` と、コマンド一覧の問い合わせを送るだけです（曲は変更しません）。
+
+Windows（PowerShell）:
+
+```powershell
+$env:STUDIO_ONE_MCP_MIDI_PORT = "studio-one-mcp"    # クライアント登録の env と同じ値
+$env:STUDIO_ONE_SONGS = "D:\共有\プロジェクト"       # 曲フォルダを指定している場合
+npm run doctor -- --profile "$env:APPDATA\PreSonus\Studio One 6"
+```
+
+macOS:
+
+```sh
+npm run doctor
+```
+
+最初に失敗した行の下に、`→` で直し方が出ます。すべて ✔ になれば、Studio One 側は整っています。
+
+`doctor` の `$env:` は、`doctor` を実行したシェルにだけ効きます。Windows で `STUDIO_ONE_MCP_MIDI_PORT` を付けずに実行すると、`Bridge answers` の行が `No MIDI output matching "IAC"` で失敗しますが、これはサーバーの設定の問題ではなく、シェルに環境変数がないだけです。
+
+次に、クライアントでサーバーが見えているかを確認します（Claude Code なら `/mcp`）。そのうえで、Claude に次のように頼みます。
+
+- 「`live_status` を呼んで」: `connected: true` が返れば、Studio One まで届いています。
+- 「`song_list` を呼んで」: 曲の一覧が返れば、曲フォルダの設定も合っています。
+
+`song_*` だけ使うなら、仮想MIDIポートも MCP Bridge も不要です。手順2・6・7だけで、`song_list` が動きます。
+
+### 別の PC に入れるとき
+
+上の手順を、新しい PC で最初からやり直します。次のものは PC ごとに違うので、設定ファイルや `setup` の結果をコピーするのではなく、PC ごとに `setup` と登録をやり直してください。
+
+- リポジトリの置き場所と Node.js のパス（登録に絶対パスが入ります）
+- 仮想MIDIポートの名前
+- 曲フォルダ
+- Studio One のプロファイルのパス
+
+リポジトリは `git clone` で取得し、すでにある PC では `git pull` で最新にします。手順の要約です。
+
+1. loopMIDI（macOS は IAC Driver）でポートを用意する
+2. `git clone` → `npm install`
+3. Studio One を一度起動して終了する
+4. `npm run setup`（Windows は `--profile` 付き）
+5. Studio One の External Devices に MCP Bridge を追加し、再起動する
+6. クライアントに登録する（`env` に曲フォルダと MIDI ポート名）
+7. `npm run doctor` と、クライアントでの `live_status` / `song_list` で確認する
+
+### 更新とアンインストール
+
+更新:
+
+```powershell
+git pull
+npm install
+npm run setup -- --profile "$env:APPDATA\PreSonus\Studio One 6"
+```
+
+`setup` は、デバイスと編集タスク拡張機能を1組として扱います。どちらかが無い、または古ければ、両方入れ直すかどうか聞きます。そのあと、**Studio One を再起動** してください。デバイスと拡張機能は、起動時にしか読み込まれません。npm の公開版なら、`npx -y studio-one-mcp@latest setup` で更新します。
+
+対話なしでデバイスだけ入れ直したいときは、`npm run install-device -- --profile "<dir>"` も使えます（`--allow-eval` で `live_eval` を有効に、`--uninstall` で削除）。
+
+アンインストール:
+
+```powershell
+node src/cli.js uninstall --profile "$env:APPDATA\PreSonus\Studio One 6"
+```
+
+続けて、Studio One の External Devices から **MCP Bridge** を削除します。クライアントの登録も不要なら削除します（Claude Code は `claude mcp remove studio-one`、Claude Desktop は設定ファイルの `studio-one` を消す）。npm の公開版なら、`npx -y studio-one-mcp uninstall` です。
+
+### トラブルシューティング
+
+まず `npm run doctor`（手順8）を実行してください。最初に失敗した行が、最初に直すところです。
+
+| 症状 | 原因と対処 |
 |---|---|
-| `STUDIO_ONE_SONGS` | `~/Documents/Studio One/Songs` (colon-separated list) |
-| `STUDIO_ONE_PROFILE` | newest `…/PreSonus/Studio One *` user folder |
-| `STUDIO_ONE_MCP_MIDI_PORT` | first MIDI output whose name contains `IAC` |
-| `STUDIO_ONE_MCP_HOME` | `~/Library/Application Support/studio-one-mcp` (the mailbox lives here) |
+| `doctor` の `Studio One profile` が `.dmp` で終わるパスになっている | クラッシュダンプのファイルを、プロファイルのフォルダと取り違えています。`--profile` で本物のフォルダを指定してください（`setup` と `uninstall` も同じです）。 |
+| `Songs folder` が `none found`。`song_list` が `[]` を返す | 既定のフォルダに曲がありません。`STUDIO_ONE_SONGS` を、クライアント登録の `env` に書いてください（手順7）。指定したフォルダの直下に、曲ごとのサブフォルダがあるかも確認します。 |
+| `song_list` が `ENOENT: no such file or directory, scandir …` で失敗する | `STUDIO_ONE_SONGS` に、存在しないフォルダが入っています。パスの綴りと、複数指定の区切り文字（Windows は `;`）を確認してください。 |
+| `Bridge device installed` や `Edit-task extension` が ✖ | `setup` を実行してください。先に、プロファイルの取り違え（1行目）でないか確認します。 |
+| `Virtual MIDI port` が ✖ | loopMIDI が起動していて、ポートがあるか確認します。`doctor` の `outputs:` に、見えているポート名の一覧が出ます。名前に `studio-one-mcp` か `loopMIDI` を含めるか、`STUDIO_ONE_MCP_MIDI_PORT` で名前を指定します。 |
+| `MIDI` が ✖、または `MIDI unavailable` | MIDI ライブラリ（`@julusian/midi`）を読み込めません。リポジトリのフォルダで `npm install` をやり直してください。 |
+| `Bridge loaded in Studio One` が ✖ | Studio One の External Devices に **MCP Bridge** を追加したか、デバイスを入れたあとに Studio One を再起動したかを確認します（手順5）。 |
+| `Bridge answers` が ✖（`did not answer "ping"`） | MCP Bridge の **Receive From** が、サーバーが鳴らすポート（`STUDIO_ONE_MCP_MIDI_PORT`）と同じか確認します。Studio One の画面に **Scripting Error** ダイアログが開いたままだと、応答できません（開いている間は、ミュートやソロなどの編集が黙って効かないこともあります）。Windows では、最初の数回の `ping` に応答がなく、その後に遅れて応答した例がありました（原因は特定できていません）。数回試してください。 |
+| `live_status` が `No MIDI output matching "IAC"` を返す | `STUDIO_ONE_MCP_MIDI_PORT` が、サーバーを起動するクライアントの登録 `env` に入っていません。Windows では必須です（手順7）。 |
+| このリポジトリのフォルダで Claude Code を開くと、`env` が効かない | リポジトリ直下の `.mcp.json`（プロジェクトスコープ）が、user スコープの登録より優先されます。項目は合成されないので、`.mcp.json` にも `env` を書いてください（手順6）。 |
+| Claude Code に `studio-one` のツールが出てこない | `/mcp` で状態を確認します。`.mcp.json` のサーバーは、初回に承認が必要です。承認の選択をやり直すには `claude mcp reset-project-choices` を実行します。 |
+| `claude mcp add` が環境変数の形式エラーで失敗する | `--env` の直後にサーバー名を置いていないか確認します。間に `--transport stdio` などの別のオプションを挟んでください（手順6）。 |
 
-## How the live bridge works
+### 設定（環境変数）
 
-Studio One runs control-surface scripts in an embedded SpiderMonkey engine. Scripts can read and write files but cannot open sockets, so the bridge is a folder. Studio One 5 also gives scripts no usable timer, so the bridge is event-driven. After writing a request, the server presses MIDI note 119 on a virtual MIDI bus (the macOS IAC Driver). The device's surface file maps that note, as a trigger control, to a toggle on a component parameter, and the component answers on each change.
+サーバーを起動するクライアントの登録の `env` に書きます（手順7）。
+
+| 環境変数 | 既定値 | 説明 |
+|---|---|---|
+| `STUDIO_ONE_SONGS` | `~/Documents/Studio One/Songs` と `~/Documents/Studio Pro/Songs`（存在するもの） | `song_*` が曲を探すフォルダ。複数指定は、Windows は `;`、macOS/Linux は `:` で区切ります。 |
+| `STUDIO_ONE_PROFILE` | `PreSonus`（または `Fender`）配下の、最新の `Studio One *` / `Studio Pro *` ユーザーフォルダ | Studio One のユーザープロファイル。 |
+| `STUDIO_ONE_APP` | Windows: `C:\Program Files` の `PreSonus` と `Fender` の下にある `Studio One *` / `Studio Pro *`。macOS: `/Applications/Studio One *.app/Contents` | Studio One 本体のインストール先（`Presets/` と `PlugIns/` があるフォルダ）。 |
+| `STUDIO_ONE_PRESETS` | ユーザーのプリセットフォルダ、続いて Studio One 付属のもの | プラグインのプリセットを探すフォルダ。複数指定の区切りは `STUDIO_ONE_SONGS` と同じです。 |
+| `STUDIO_ONE_REMOTE_MAP` | Studio One 内蔵のリモコンマップ（surfacedata XML） | 複数指定の区切りは `STUDIO_ONE_SONGS` と同じです。Windows の既定パスは推測で、見つからなくても、パラメーター名が減るだけです。 |
+| `STUDIO_ONE_MCP_MIDI_PORT` | 名前に `IAC` を含む最初の MIDI 出力 | 呼び鈴を鳴らす仮想MIDIポートの名前（部分一致。大文字小文字は区別しません）。Windows では必須です。 |
+| `STUDIO_ONE_MCP_HOME` | macOS: `~/Library/Application Support/studio-one-mcp`。それ以外: `~/.studio-one-mcp` | データフォルダ。メールボックスはこの下の `mailbox` です。 |
+
+## ライブブリッジのしくみ
+
+Studio One は、コントロールサーフェスのスクリプトを、組み込みの SpiderMonkey エンジンで実行します。スクリプトはファイルの読み書きはできますが、ソケットは開けません。そこでブリッジはフォルダです。Studio One 5 はスクリプトにまともに使えるタイマーも与えないので、ブリッジはイベント駆動です。サーバーはリクエストを書いたあと、仮想MIDIバス（macOS では IAC Driver、Windows では loopMIDI）で MIDI ノート 119 を押します。デバイスのサーフェスファイルは、そのノートをトリガーコントロールとして、コンポーネントのパラメーターのトグルに割り当てています。コンポーネントは、変化のたびに応答します。
 
 ```mermaid
 flowchart LR
-  client["MCP client<br/>(Claude)"] <-->|stdio| server["studio-one-mcp<br/>server (Node)"]
-  server -->|"1 write request.json"| mailbox[("mailbox folder<br/>request.json<br/>response.json<br/>status.json")]
-  server -->|"2 press note 119"| iac["virtual MIDI bus<br/>(IAC Driver)"]
+  client["MCPクライアント<br/>(Claude)"] <-->|stdio| server["studio-one-mcp<br/>サーバー (Node)"]
+  server -->|"1 request.json を書く"| mailbox[("メールボックスフォルダ<br/>request.json<br/>response.json<br/>status.json")]
+  server -->|"2 ノート 119 を押す"| iac["仮想MIDIバス<br/>(IAC Driver / loopMIDI)"]
   subgraph s1 ["Studio One"]
-    device["MCP Bridge device<br/>(control-surface script)"]
-    doc["song, mixer, transport,<br/>commands"]
-    task["MCP Edit task<br/>(extension)"]
+    device["MCP Bridge デバイス<br/>(コントロールサーフェス・スクリプト)"]
+    doc["曲、ミキサー、トランスポート、<br/>コマンド"]
+    task["MCP Edit タスク<br/>(拡張機能)"]
   end
-  iac -->|"3 note wakes the script"| device
-  mailbox -->|"4 read request"| device
-  device <-->|"5 run the op"| doc
-  device -.->|"note edits only"| task
-  device -->|"6 write response.json"| mailbox
-  mailbox -->|"7 read response"| server
+  iac -->|"3 ノートでスクリプトが起きる"| device
+  mailbox -->|"4 リクエストを読む"| device
+  device <-->|"5 操作を実行"| doc
+  device -.->|"ノート編集のみ"| task
+  device -->|"6 response.json を書く"| mailbox
+  mailbox -->|"7 レスポンスを読む"| server
 ```
 
 ```
-status.json    device → client   session id and heartbeat; refreshed whenever the bridge runs
-request.json   client → device   {id, op, args}, written atomically (tmp + rename)
-response.json  device → client   {id, ok, result | error}
+status.json    デバイス → クライアント   セッション ID とハートビート。ブリッジが動くたびに更新
+request.json   クライアント → デバイス   {id, op, args}。アトミックに書く（一時ファイル + リネーム）
+response.json  デバイス → クライアント   {id, ok, result | error}
 ```
 
-One request, step by step:
+1回のリクエストを順に追うと、次のようになります。
 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant C as MCP client
-  participant S as studio-one-mcp server
-  participant M as mailbox folder
-  participant B as IAC Driver (MIDI)
-  participant D as MCP Bridge device in Studio One
-  C->>S: tool call, e.g. live_set_channel
-  S->>M: read status.json (is the bridge loaded?)
-  S->>M: write request.json {id, op, args} (tmp file, then rename)
-  loop every 150 ms until answered (5 s timeout)
-    S->>B: note 119 (the doorbell)
-    B->>D: trigger toggles the bridgeTick parameter
+  participant C as MCPクライアント
+  participant S as studio-one-mcp サーバー
+  participant M as メールボックスフォルダ
+  participant B as 仮想MIDI (IAC Driver / loopMIDI)
+  participant D as Studio One 内の MCP Bridge デバイス
+  C->>S: ツール呼び出し (例: live_set_channel)
+  S->>M: status.json を読む (ブリッジは読み込み済みか)
+  S->>M: request.json {id, op, args} を書く (一時ファイルに書いてからリネーム)
+  loop 応答があるまで 150 ms ごと (タイムアウトは 5 秒)
+    S->>B: ノート 119 (呼び鈴)
+    B->>D: トリガーが bridgeTick パラメーターを切り替える
   end
-  D->>M: refresh status.json (heartbeat)
-  D->>M: read request.json
-  Note over D: a new id? run the op in Studio One. An id already answered is skipped, so repeat presses are harmless.
-  D->>M: write response.json {id, ok, result | error}
-  loop every 20 ms
-    S->>M: read response.json
+  D->>M: status.json を更新 (ハートビート)
+  D->>M: request.json を読む
+  Note over D: 新しい id なら Studio One 内で操作を実行する。応答済みの id は読み飛ばすので、呼び鈴を繰り返し押しても害はない。
+  D->>M: response.json {id, ok, result | error} を書く
+  loop 20 ms ごと
+    S->>M: response.json を読む
   end
-  Note over S: the response id matches the request id
-  S->>C: result, or the error as a tool error
+  Note over S: レスポンスの id がリクエストの id と一致する
+  S->>C: 結果、またはエラー (ツールエラーとして)
 ```
 
-The client re-sends the press every 150 ms until a response arrives. The component answers each request id once, and the client sends one request at a time (the mailbox has a single slot).
+クライアントは、応答が来るまで 150 ms ごとに呼び鈴を押し直します。コンポーネントは、各リクエストの id に1回だけ答えます。クライアントは一度に1つのリクエストしか送りません（メールボックスのスロットは1つです）。
 
-For note edits (`live_edit_notes`) there is one more hop inside Studio One, described under [Editing notes](#editing-notes): the device writes the operations to `edit-request.json`, runs the **MCP Edit** command, and reads `edit-result.json` before it writes its response.
+ノート編集（`live_edit_notes`）では、Studio One の内部でもう1段の経路を通ります。[ノートの編集](#ノートの編集)で説明します。デバイスが操作を `edit-request.json` に書き、**MCP Edit** コマンドを実行し、`edit-result.json` を読んでから、レスポンスを書きます。
 
-Two rules for anything that runs inside Studio One, both learned on 5.5.2:
+Studio One の中で動くものすべてに当てはまるルールが2つあります。どちらも 5.5.2 で学んだものです。
 
-- Never `throw`. An exception raised while Studio One is calling into a script becomes a modal **Scripting Error** dialog, even when the code catches it. While that dialog is open, some edits (mute, solo) silently do not apply. The device scripts return errors as values, and a test enforces it.
-- Never call a member of a host object without first checking that it exists. A TypeError on a host object raises the same dialog.
-- The same goes for code sent through `live_eval`. A `throw` there popped the dialog in testing, the first time in a session, even though the bridge catches it and reports the error.
+- 決して `throw` しない。Studio One がスクリプトを呼び出している最中に例外が出ると、コードで捕まえていても、モーダルな **Scripting Error** ダイアログになります。そのダイアログが開いている間は、一部の編集（ミュート、ソロ）が黙って反映されません。デバイスのスクリプトはエラーを値として返し、テストでそれを検証しています。
+- ホストオブジェクトのメンバーは、存在を確認せずに呼ばない。ホストオブジェクトでの TypeError も、同じダイアログを出します。
+- `live_eval` で送るコードにも同じことが当てはまります。そこでの `throw` は、ブリッジが捕まえてエラーを報告するにもかかわらず、テスト中、セッション内の最初の1回に、ダイアログを出しました。
 
-### Editing notes
+### ノートの編集
 
-A control-surface script can read notes but not change them. Studio One's own Musical Functions (Transpose, Velocity, Quantize…) are *edit tasks*: scripts that Studio One hands the selected notes and a set of editing functions. studio-one-mcp installs one of its own, **MCP Edit**, as a user extension: a folder in the profile's `Extensions` with a ZIP `.package` inside (a loose `Scripts` folder is not scanned). It shows up as the command `Musical Functions/MCP Edit`. For `live_edit_notes`, the bridge writes the operations to `mailbox/edit-request.json`, selects the track's parts, runs that command, and reads `mailbox/edit-result.json`. The task asks for no dialog, so none opens, and it applies only a fixed set of operations, never code from the mailbox.
+コントロールサーフェスのスクリプトは、ノートを読めますが、変更はできません。Studio One 自身の Musical Functions（トランスポーズ、ベロシティ、クオンタイズ…）は *編集タスク* です。Studio One が、選択中のノートと一式の編集関数を渡して実行するスクリプトです。studio-one-mcp は、自前の編集タスク **MCP Edit** を、ユーザー拡張機能として導入します。プロファイルの `Extensions` の中のフォルダに、ZIP の `.package` を置く形です（バラの `Scripts` フォルダはスキャンされません）。コマンド `Musical Functions/MCP Edit` として現れます。`live_edit_notes` では、ブリッジが操作を `mailbox/edit-request.json` に書き、そのトラックのパートを選択し、このコマンドを実行して、`mailbox/edit-result.json` を読みます。このタスクはダイアログを要求しないので何も開かず、決まった操作の集合だけを適用します。メールボックスから受け取ったコードを実行することはありません。
 
-`live_edit_notes` cannot start from nothing: Studio One disables Musical Functions while the selected part has no notes, and an edit task's `add` goes into the first selected note's part. So `live_create_part` and `live_add_notes` run in the MCP Track Edit task instead (below). There, `MusicPartFunctions.addMusicPart(start, end, track)` makes the part (start and end are `MediaTime`s; other argument orders silently do nothing), and `MusicFunctions` has the same `createEvent` / `insertEvent` / `modifyPitch` / `modifyVelocity` / `resizeEvent` / `moveEvent` set that an edit task gets, with `moveEvent` taking beats from the start of the part.
+`live_edit_notes` は、何もない状態からは始められません。選択中のパートにノートが1つもないと Studio One が Musical Functions を無効にし、編集タスクの `add` は、選択中の最初のノートのパートに入ってしまうからです。そこで `live_create_part` と `live_add_notes` は、代わりに MCP Track Edit タスク（下記）の中で動きます。そこでは `MusicPartFunctions.addMusicPart(start, end, track)` がパートを作り（start と end は `MediaTime` で、引数の順序を間違えると何も起きません）、`MusicFunctions` には、編集タスクが受け取るのと同じ `createEvent` / `insertEvent` / `modifyPitch` / `modifyVelocity` / `resizeEvent` / `moveEvent` が揃っています。`moveEvent` は、パートの先頭からの拍数を取ります。
 
-The extension carries a second task, **MCP Track Edit** (`Track/MCP Track Edit`), for what a control-surface script cannot change on tracks: routing a channel's output (through the same `connectChannel` that Studio One's "Add Bus for Selected Channels" uses), moving tracks into folders, and renaming events. It works the same way, through `track-edit-request.json` and `track-edit-result.json`, and needs no selection. Its song-structure operations are in `McpTrackOps.js`: track order, instrument tracks, plug-ins and FX sends, single events, arranger sections, markers and time signatures. Everything one run of the task changes is one undo step. Studio One reads the package each time the task runs, so a reinstall takes effect without a restart (the bridge device itself still needs one).
+拡張機能にはもう1つ、コントロールサーフェスのスクリプトからは変更できないトラック側の操作のための **MCP Track Edit**（`Track/MCP Track Edit`）タスクが入っています。チャンネル出力のルーティング（Studio One の "Add Bus for Selected Channels" が使うのと同じ `connectChannel` 経由）、トラックのフォルダへの移動、イベント名の変更です。仕組みは同じで、`track-edit-request.json` と `track-edit-result.json` を介し、選択は不要です。曲構造に関する操作は `McpTrackOps.js` にあります: トラックの並び順、インストゥルメントトラック、プラグインと FX センド、個別のイベント、アレンジャーセクション、マーカー、拍子。タスクを1回実行して変わるものは、すべてアンドゥ1回分です。Studio One は、タスクを実行するたびにパッケージを読み直すので、再インストールは再起動なしで反映されます（ブリッジのデバイス自体は、再起動が必要です）。
 
-What these found out about Studio One 5.5.2, in short:
+これらを作る過程で分かった、Studio One 5.5.2 についての要点です。
 
-- The Marker Track and Arranger Track are the first two tracks the song's own track iterator gives, and their events are the markers and sections, with names. Event times are numbers in each event's own time format (seconds, samples or quarter-note beats), converted through a `MediaTime`.
-- A track leaves a folder for the top level right *after* that folder, and a top-level track does not move at all, so reordering goes through a temporary folder made at the target place.
-- `DeviceEditFunctions.insertDevice` (what Studio One's own Insert FX task uses) puts plug-ins on the undo stack; the insert folder's own `insertDeviceClass` does not. Into a channel's Sends it makes an FX channel with a send. A send to an existing bus has no scripted route.
-- Commands that open a dialog take its values as arguments (`findCommand(...).arguments` lists them, e.g. `Bar, Numerator, Denominator` for Insert Time Signature). Given as **numbers** they run without the dialog; given as strings the dialog opens and blocks the bridge until someone closes it.
-- Edit/Paste goes to the editor's focus track, not the selected one; the task focuses the target first.
-- There is no scripted way to add automation envelope points, so `live_write_automation` records them the way a person would, in Write mode.
-- With an arranger section selected, Edit/Copy takes the section *and* everything under it, and Edit/Paste inserts that at the playhead; Edit/Delete and Cut take only the section. Edit/Delete Time in Loop removes a range from every track, section and marker.
+- マーカートラックとアレンジャートラックは、曲自身のトラックイテレーターが返す最初の2つのトラックで、それらのイベントがマーカーとセクション（名前付き）です。イベントの時刻は、各イベント固有の時間形式（秒、サンプル、4分音符の拍）の数値で、`MediaTime` を介して変換します。
+- トラックがフォルダから最上位に出ると、そのフォルダの*直後*に置かれます。また、最上位のトラックはまったく動かせません。そのため、並べ替えは、移動先に作った一時フォルダを経由して行います。
+- `DeviceEditFunctions.insertDevice`（Studio One 自身の Insert FX タスクが使うもの）は、プラグインをアンドゥスタックに積みますが、インサートフォルダ自身の `insertDeviceClass` は積みません。チャンネルのセンドに対して使うと、FX チャンネルとそこへのセンドが作られます。既存のバスへのセンドには、スクリプトから使える経路がありません。
+- ダイアログを開くコマンドは、ダイアログの値を引数として受け取ります（`findCommand(...).arguments` で一覧でき、たとえば拍子の挿入なら `Bar, Numerator, Denominator`）。**数値**で渡せばダイアログなしで実行されますが、文字列で渡すとダイアログが開き、誰かが閉じるまでブリッジが止まります。
+- Edit/Paste は、選択中のトラックではなく、エディタのフォーカストラックに貼り付けます。タスクは、先に対象にフォーカスを当てます。
+- オートメーションのエンベロープの点を追加する、スクリプト向けの方法はありません。そのため `live_write_automation` は、人が行うのと同じように、Write モードで録り込みます。
+- アレンジャーセクションを選択した状態では、Edit/Copy はセクション*とその下のすべて*を取り、Edit/Paste はそれをプレイヘッド位置に挿入します。Edit/Delete と Cut はセクションだけを取ります。Edit/Delete Time in Loop は、全トラック・セクション・マーカーから範囲を取り除きます。
 
-### Watching for changes
+### 変更の監視
 
-`live_changes` takes a snapshot of the song on every call (tracks and their events, the mixer, plug-ins, tempo, loop, markers and sections), keeps it in the studio-one-mcp data folder per song, and reports the difference from the previous one. The first call for a song only takes a look. Changes are net (a fader moved and moved back is no change) and do not say who made them.
+`live_changes` は、呼び出しのたびに曲のスナップショット（トラックとそのイベント、ミキサー、プラグイン、テンポ、ループ、マーカー、セクション）を撮り、曲ごとに studio-one-mcp のデータフォルダ（`STUDIO_ONE_MCP_HOME`）へ保存して、前回との差分を報告します。その曲での最初の呼び出しは、現状を記録するだけです。変化は正味のものです（フェーダーを動かして戻せば、変化なし）。誰が変えたかは分かりません。
 
-Studio One 5.5.2 can also notify scripts of changes (`Host.Signals.advise`), and a live feed built on that was tried and dropped: it crashed Studio One three times. Reading a parameter's text while a song was closing crashed it at once; unsubscribing from an object that was already gone crashed it about a minute later; and unsubscribing while Studio One quit crashed it at quit. A close does send the DocumentManager's `activeDocumentChanged` before tearing the song down, but there is no such notice before quitting, so there is no safe moment to let go. Comparing snapshots touches none of that.
+Studio One 5.5.2 は、スクリプトに変更を通知することもできます（`Host.Signals.advise`）。それを使ったライブフィードを試しましたが、Studio One が3回クラッシュしたので取りやめました。曲を閉じている最中にパラメーターのテキストを読むと、即座にクラッシュしました。すでに存在しないオブジェクトの購読を解除すると、約1分後にクラッシュしました。Studio One の終了中に購読を解除すると、終了時にクラッシュしました。曲を閉じるときは、曲を壊す前に DocumentManager の `activeDocumentChanged` が送られますが、終了前にはそのような通知がないので、安全に手放せるタイミングがありません。スナップショットの比較なら、そのどれにも触れません。
 
-### Undo
+### アンドゥ
 
-Changing a mixer parameter and setting it back (volume, monitor, a plug-in parameter, automation mode) is recorded as one undo step that changes nothing, and it is recorded late, on top of edits made after it. So an Undo right after such a change can remove that invisible step instead of the edit you just made. Check the song after undoing, and undo again until your edit is gone. The live tests do exactly that, and they stop and redo if an undo changes the song's track or channel count unexpectedly.
+ミキサーのパラメーターを変更して元に戻す操作（ボリューム、モニター、プラグインのパラメーター、オートメーションモード）は、何も変えない1回分のアンドゥステップとして記録されます。しかも記録は遅れて、その後に行った編集の上に積まれます。そのため、こうした変更の直後にアンドゥすると、直前の編集ではなく、その見えないステップが取り消されることがあります。アンドゥしたら曲を確認し、自分の編集が消えるまで繰り返してください。ライブテストはまさにそうしています。アンドゥで曲のトラック数やチャンネル数が想定外に変わった場合は、止めてリドゥします。
 
-## Testing
+## テスト
 
 ```sh
-npm test            # unit and end-to-end tests; no Studio One needed
-npm run test:live   # against a running Studio One with the bridge installed
+npm test            # ユニットテストとエンドツーエンドテスト。Studio One は不要
+npm run test:live   # ブリッジを入れた、起動中の Studio One に対して実行
 ```
 
-The unit tests run the real device scripts and the edit task under `node:vm` against a fake Studio One host (`test/helpers/s1host.js`). The live tests change only what they restore, and check the song afterwards (tracks, channels and the track selection are compared at the end of the run). They never record, save or bounce.
+ユニットテストは、実際のデバイススクリプトと編集タスクを `node:vm` の中で、偽の Studio One ホスト（`test/helpers/s1host.js`）に対して実行します。ライブテストは、元に戻せるものだけを変更し、終了後に曲を確認します（実行の最後に、トラック、チャンネル、トラックの選択を比較します）。録音、保存、バウンスは決して行いません。
 
-- Set and set back: one channel's mute, solo, volume, monitor and automation mode; a plug-in parameter (directly and through a snapshot); a send level; the metronome's click and precount length; the tempo, playhead and loop; takes (next/previous and go-to).
-- Edits that are then undone: a split, an added track, an added and duplicated take, a bus, and note edits (a transpose, a velocity and a quantize) through the edit task; a track moved, a plug-in added, an instrument track added, an event moved with gain and a fade, an event copied, a section added and renamed, a named marker added and renamed. Undo runs until the edit is gone (see [Undo](#undo)).
-- A time signature inserted at bar 9 and removed again.
-- Not in the live suite: `live_add_send` (not reliably undone) and `live_write_automation` (it plays the song). Both were checked by hand on a scratch song, the automation by saving and reading the envelope back.
-- A marker is added at 3.25 s and deleted; a track's events are muted and unmuted; a track is muted and muted again (track mute is not on the undo stack); a scratch track is added, renamed, recoloured and removed.
-- Some tests need something in the song and skip without it: a PreSonus plug-in on a channel, a send, a track with takes, an instrument track with notes, and two saved arranger sections.
+- 設定して元に戻す: 1チャンネルのミュート、ソロ、ボリューム、モニター、オートメーションモード。プラグインのパラメーター（直接と、スナップショット経由）。センドレベル。メトロノームのクリックとプリカウントの長さ。テンポ、プレイヘッド、ループ。テイク（次/前への切り替えと、番号指定）。
+- 編集して、アンドゥで戻す: 分割、トラックの追加、テイクの追加と複製、バス、編集タスク経由のノート編集（トランスポーズ、ベロシティ、クオンタイズ）。トラックの移動、プラグインの追加、インストゥルメントトラックの追加、ゲインとフェード付きのイベントの移動、イベントのコピー、セクションの追加と名前変更、名前付きマーカーの追加と名前変更。アンドゥは、編集が消えるまで繰り返します（[アンドゥ](#アンドゥ)を参照）。
+- 9小節目への拍子の挿入と、その削除。
+- ライブのテストに含めないもの: `live_add_send`（確実にはアンドゥできないため）と `live_write_automation`（曲を再生するため）。どちらも、練習用の曲で手作業で確認しました。オートメーションは、保存してエンベロープを読み戻して確認しています。
+- 3.25 秒へのマーカーの追加と削除。トラックのイベントのミュートとミュート解除。トラックをミュートして戻す（トラックのミュートはアンドゥスタックに積まれません）。練習用トラックの追加、名前変更、色変更、削除。
+- 一部のテストは、曲に特定のものが必要で、無ければスキップされます: チャンネル上の PreSonus のプラグイン、センド、テイクのあるトラック、ノートのあるインストゥルメントトラック、保存済みのアレンジャーセクション2つ。
 
-File/Save is only checked, never run. Record modes and bouncing are not in the live suite: record modes cannot be read back to restore them, and every bounce leaves a file in the song folder.
+File/Save は、有効かどうかを確認するだけで、実行はしません。録音モードとバウンスは、ライブのテストに含めていません。録音モードは、元に戻すための読み取りができず、バウンスは毎回、曲のフォルダにファイルを残すためです。
 
-Security: anything that can write to the mailbox folder, which means anything running as your user, can drive Studio One through it. With `--allow-eval`, it can also run arbitrary script inside Studio One. Keep the folder local, and leave eval off unless you are exploring.
+セキュリティ: メールボックスフォルダに書き込めるもの、つまりあなたのユーザー権限で動くものなら何でも、そこを通じて Studio One を操作できます。`--allow-eval` でインストールした場合（`setup` で `live_eval` を有効にした場合）は、Studio One の中で任意のスクリプトを実行することもできます。このフォルダはローカルに留め、探索するとき以外は eval を無効にしておいてください。
 
-## Format notes (`.song`)
+## `.song` ファイルの形式メモ
 
-These were verified on songs saved by Studio One 5.5.2:
+Studio One 5.5.2 で保存した曲で確認したことです。
 
-- Events and markers with `timeFormat="2"` are in **quarter-note beats**. An audio event's `length` equals the clip's `frameCount / sampleRate × bpm / 60`.
-- `TempoMapSegment@tempo` is **seconds per quarter note**, so 0.5 means 120 bpm.
-- The transport's position and loop points are in **seconds**.
-- Mixer `gain` is linear amplitude, and `pan` runs from 0 to 1 with 0.5 as centre.
-- A track's takes are `Layers`, and `MediaTrack@activeLayer` picks the one that plays.
-- Tracks link to mixer channels through `UID x:id="channelID"`, which matches the channel's `uniqueID`.
-- Insert slots are the unnamed `<Attributes name="FXnn">` children of `Inserts`. Siblings with an `x:id` (`Presets`, `Combinator`) are rack state.
+- `timeFormat="2"` のイベントとマーカーは、**4分音符の拍** 単位です。オーディオイベントの `length` は、クリップの `frameCount / sampleRate × bpm / 60` に等しくなります。
+- `TempoMapSegment@tempo` は **1四分音符あたりの秒数** です。0.5 なら 120 bpm です。
+- トランスポートの位置とループポイントは **秒** 単位です。
+- ミキサーの `gain` はリニアな振幅で、`pan` は 0 から 1 まで、0.5 が中央です。
+- トラックのテイクは `Layers` で、`MediaTrack@activeLayer` が再生されるものを選びます。
+- トラックは、`UID x:id="channelID"` を通じてミキサーチャンネルに結び付き、これはチャンネルの `uniqueID` と一致します。
+- インサートのスロットは、`Inserts` の子である、名前のない `<Attributes name="FXnn">` です。`x:id` を持つ兄弟要素（`Presets`、`Combinator`）は、ラックの状態です。
 
-## Prior art
+## 先行事例
 
-- [tiwadara/StudioOneMcp](https://github.com/tiwadara/StudioOneMcp) drives Studio One through MIDI, Mackie Control and UI automation. It is write-only.
-- [Alari81/studio-control](https://github.com/Alari81/studio-control) proved the file-mailbox device pattern on Studio Pro 8. It uses a different, noncommercial license, and no code from it is included here.
-- [CSources/Studio-Pro-Scripting-API-Reference](https://github.com/CSources/Studio-Pro-Scripting-API-Reference) is a community reference for the scripting API.
+- [tiwadara/StudioOneMcp](https://github.com/tiwadara/StudioOneMcp) は、MIDI、Mackie Control、UI オートメーションで Studio One を操作します。書き込み専用です。
+- [Alari81/studio-control](https://github.com/Alari81/studio-control) は、Studio Pro 8 で、ファイルメールボックス方式のデバイスが成り立つことを示しました。ライセンスが異なり（非商用）、そのコードはここには含まれていません。
+- [CSources/Studio-Pro-Scripting-API-Reference](https://github.com/CSources/Studio-Pro-Scripting-API-Reference) は、スクリプト API のコミュニティによるリファレンスです。
 
-Studio One is a trademark of PreSonus Audio Electronics / Fender. This project is not affiliated with either.
+Studio One は、PreSonus Audio Electronics / Fender の商標です。このプロジェクトは、どちらとも無関係です。
 
-## License
+## ライセンス
 
 MIT
